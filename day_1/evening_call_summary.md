@@ -1,0 +1,3 @@
+# Evening call summary - Day 1
+
+During the evening call, Abdulaziz confirmed the core gap was whether `ci_low = 0.00` and `p = 0.0316` can both be valid in the same paired-bootstrap result at `n=12`. He asked for a clearer mechanism-level explanation of the zero-mass spike and a direct reporting rule for executive memos. I revised the explainer to make the discrete-resample mechanism explicit, added a runnable `n=12 -> 30 -> 100` simulation framing, and tightened the memo language so CI and p-value are presented as complementary, not contradictory. Abdulaziz signed off that the gap is closed and that the revised framing is usable in downstream Week 11 artifacts.

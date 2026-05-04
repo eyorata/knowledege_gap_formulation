@@ -1,85 +1,131 @@
-# Why Your Two Cost Numbers Differ — Prefix Caching and the FDE Rate Card
-
-**Day 1 explainer · Topic: Inference-time mechanics · Asked by: [partner] · Explainer by: Eyoel Nebiyu**
+# Explainer: Why ci_low = 0.00 and p = 0.0316 at the Same Time (And What to Put in Your Memo)
 
 ---
 
-## The question, anchored
+## The Question
 
-You asked why your `cost_pareto` block reports `$0.0029` and `$0.0047` per call for two judge configurations on the same eval, why latency looks flat across them, and what gets recomputed each call versus what an inference cache reuses. For an API-served setup the answer is dominated by **one** mechanism: server-side **prefix caching**. KV-cache mechanics, prefill-vs-decode billing, and token-level billing all sit downstream of it. This explainer narrows hard to prefix caching and shows you how to derive your two numbers from first principles. The skipped sub-mechanisms are listed at the bottom as v0.2 follow-ups.
+Eyoel ran a paired bootstrap on 12 binary outcomes and got two numbers that look like they disagree:
+- `ci_low = 0.00` (the 95% CI lower bound lands exactly on zero)
+- `p = 0.0316` (the one-sided p-value clears 0.05, suggesting a real lift)
 
-## The load-bearing mechanism
+Which one is right? Do they contradict each other? And as an FDE writing a memo to a non-technical executive — which number do you lead with?
 
-When you call a hosted LLM API with a system prompt that's identical across many calls, the provider doesn't reprocess those tokens from scratch every time. They store the prefix's KV-cache server-side under a hash of the prompt prefix; on the next call with the same prefix they read it back instead of recomputing it. Anthropic's contract is the most explicit and the cleanest to teach against:
-
-- **TTL:** 5 minutes from last hit. The cache is refreshed each time it's read, so back-to-back evaluation runs keep it warm.
-- **Minimum prefix:** 1024 tokens. Smaller prefixes are not cached at all — there is no partial discount, no proportional benefit; below the threshold you pay the full rate.
-- **Three rates apply per call:**
-  - **Cache write** (first time the prefix is seen): ~1.25× the normal prompt-token rate.
-  - **Cache read** (every subsequent hit within the TTL): ~0.10× the normal rate — a 90% discount.
-  - **Completion** (the new tokens you're generating): unchanged from the rate card.
-- **Prefix matching is left-to-right exact.** Change one character of your system prompt and you invalidate the cache; you pay the cache-write rate again on the next call.
-
-OpenAI and Google offer similar mechanisms with different parameters. The teaching point generalizes: **once your system prompt is stable and above the minimum length, cache reads become the dominant pricing event, not writes or completions.**
-
-## Showing the math
-
-Setup, using illustrative Anthropic-Sonnet-class rates:
-
-- System prompt (rubric + examples): **1500 tokens** (above the 1024 minimum).
-- Per-task: **200 prompt tokens** (scenario + candidate) + **100 completion tokens**.
-- Rate card: **$3.00 per 1M prompt tokens**, **$15.00 per 1M completion tokens**.
-
-**Configuration A — system prompt stable across 12 evaluations:**
-
-```
-Call 1 (cache write):
-  prompt cost = 1500 * $3 * 1.25 / 1M  = $0.005625
-  user cost   =  200 * $3        / 1M  = $0.000600
-  output cost =  100 * $15       / 1M  = $0.001500
-  total       = $0.007725
-Calls 2–12 (cache read):
-  prompt cost = 1500 * $3 * 0.10 / 1M  = $0.000450
-  user cost   =  200 * $3        / 1M  = $0.000600
-  output cost =  100 * $15       / 1M  = $0.001500
-  total       = $0.002550
-Mean per call = (0.007725 + 11 * 0.002550) / 12 ≈ $0.002995 ≈ $0.0030
-```
-
-**Configuration B — system prompt drifts per call (or is below the 1024 threshold):**
-
-```
-Every call is a cache miss/write equivalent:
-  prompt cost = 1500 * $3        / 1M  = $0.004500
-  user cost   =  200 * $3        / 1M  = $0.000600
-  output cost =  100 * $15       / 1M  = $0.001500
-  total per call = $0.006600
-```
-
-So Configuration A's `$0.0029` is what 11 cache reads + 1 cache write averages to. Configuration B's `$0.0047` is most consistent with a **partial-caching regime**: maybe 60% of calls hit the cache and 40% miss, or one of two judge variants has a stable prompt and the other has per-task templating. The two numbers aren't measuring different inference compute. They're measuring different **cache-hit ratios on the same compute.**
-
-That's the diagnostic answer. To defend the cost claim in your model card, you need three numbers per arm: the cache-hit rate, the system-prompt token count, and the rate card. Drop those three into the calculation above and the per-task cost falls out.
-
-## Why latency looks flat
-
-Cache reads cut **prompt-processing time** by ~90%, but total API latency is dominated by decode (≈ completion-token-count × 30–50 ms/token) and network RTT, not prefill. For a 1500/200/100 split: prefill ≈ 1.7 s uncached → 0.27 s cached, decode ≈ 3.5 s, network ≈ 0.2 s. Total ~5.4 s uncached → ~4.0 s cached — a 25 % wall-time saving that doesn't show up in p95 latency because decode-time variance across 12 evaluations is usually larger than the prefill delta. Latency looks flat because you're measuring the wrong axis; per-call **prompt-processing time** would expose the effect.
-
-## Two adjacent concepts (one paragraph each)
-
-**KV cache vs prefix cache — same data structure, different scope.** The KV cache is the *intra-call* mechanism that makes transformer decode O(n) instead of O(n²): for each new token you generate, you reuse the keys and values already computed for the prior tokens within the same forward pass. Every API call uses a KV cache. Prefix caching is the *inter-call* mechanism: the provider persists the KV cache for a stable prompt prefix between your separate calls, hashed and stored server-side. Easy to conflate; they're the same idea applied at two different time scales.
-
-**Why prompt tokens are usually 5–10× cheaper than completion tokens.** Prefill (processing the prompt) is parallel — the GPU computes attention for all prompt tokens at once, fully utilizing the matrix-multiply hardware. Decode is sequential — one token at a time, with the GPU's matmul units mostly idle while waiting for the previous token. The rate card reflects compute cost. The cache-read discount applies to prefill only; your completion rate is unchanged regardless of cache state.
-
-## What I deliberately skipped (the v0.2 list)
-
-This explainer does **not** cover: vLLM's `--enable-prefix-caching` and PagedAttention internals (the self-hosted analogue — Kwon et al. 2023 is the canonical paper); tokenizer billing nuance (BPE merges shifting per-call token counts in non-obvious ways); continuous batching and how the server packs your call into a batch with other tenants; or KV-cache memory-pressure failures on very long context. Each is a separate explainer that I'd write next; the partner has the v0.2 list to vote on.
-
-## Pointers
-
-- **Anthropic, *Prompt caching* documentation** — the contract: TTL, minimum prefix, three rates, exact-prefix matching. https://docs.claude.com/en/docs/build-with-claude/prompt-caching
-- **Kwon et al., *Efficient Memory Management for Large Language Model Serving with PagedAttention*, SOSP 2023** — the self-hosted analogue. Section 3 (the paged KV-cache structure) is the load-bearing read.
-- **OpenAI prompt-cache release notes (Oct 2024)** — the OpenAI version of the same contract with different parameters.
+They do not contradict each other. They measure different things. Here is exactly why.
 
 ---
 
-*If your judge is self-hosted on vLLM rather than served via API, the same principle applies but the implementation is `--enable-prefix-caching` and the cost arithmetic is GPU-hour-based rather than per-token. That's the v0.2 follow-up if you tell me which deployment you're on.*
+## The Mechanism: Why ci_low Lands Exactly on Zero
+
+When you run a paired bootstrap on 12 binary (0/1) outcomes, each resample picks 12 indices with replacement from your 12 pairs. Because the outcomes are only 0 or 1, the number of possible unique mean differences is very small.
+
+Think about it this way. With 12 binary pairs, each resample can only produce a mean between 0.00 and 1.00 in steps of 1/12 (0.00, 0.083, 0.167, 0.25...). That means the difference between two resampled means can only land on a small set of discrete values. Many resamples will produce a difference of exactly 0.00 — when by chance the trained model and baseline get the same count of correct answers in that resample.
+
+This creates a **spike of mass at zero** in your 10,000 resample distribution. When you ask numpy to find the 2.5th percentile of that distribution, it lands directly on that spike. That is why `ci_low = 0.00` exactly — not approximately, not nearly, but exactly. This is what "small-n quantization" means. The word is correct. The mechanism is the discreteness of binary outcomes at small n.
+
+---
+
+## Why the P-value Says Something Different
+
+Your p-value is computed as:
+
+```python
+p_value = float((diffs <= 0).mean())
+```
+
+This asks: **"In what fraction of my 10,000 resamples did the trained model NOT beat the baseline?"**
+
+The answer is 3.16% of resamples. That means in 96.84% of resamples, the trained model beat the baseline. That is what p = 0.0316 is telling you.
+
+Now here is the key insight. The CI and the p-value are asking completely different questions:
+
+- **CI asks:** "What is the range that contains 95% of my resample differences?" → Zero is at the very edge of that range
+- **P-value asks:** "What fraction of resamples showed zero or negative lift?" → Only 3.16%
+
+Zero being at the edge of the CI does not mean the p-value is wrong. It means zero is a possible outcome in your resample distribution — but a rare one. Both numbers are simultaneously true and correct.
+
+---
+
+## Show Me The Code
+
+Run this yourself and watch what happens as n grows:
+
+```python
+import numpy as np
+
+def paired_bootstrap(a, b, n_resamples=10000, seed=42):
+    rng = np.random.default_rng(seed)
+    a, b = np.array(a), np.array(b)
+    diffs = []
+    for _ in range(n_resamples):
+        idx = rng.integers(0, len(a), size=len(a))
+        diffs.append(a[idx].mean() - b[idx].mean())
+    diffs = np.array(diffs)
+    return {
+        "ci_low":  float(np.percentile(diffs, 2.5)),
+        "ci_high": float(np.percentile(diffs, 97.5)),
+        "p_value": float((diffs <= 0).mean())
+    }
+
+# n=12: your actual situation
+a12 = np.array([1,1,1,1,1,0,0,0,0,0,0,0])  # 5/12 = 0.417
+b12 = np.array([1,1,0,0,0,0,0,0,0,0,0,0])  # 2/12 = 0.167
+
+# n=30: medium sample
+rng = np.random.default_rng(99)
+a30 = rng.binomial(1, 0.42, 30)
+b30 = rng.binomial(1, 0.17, 30)
+
+# n=100: large sample
+a100 = rng.binomial(1, 0.42, 100)
+b100 = rng.binomial(1, 0.17, 100)
+
+for label, a, b in [("n=12", a12, b12), ("n=30", a30, b30), ("n=100", a100, b100)]:
+    result = paired_bootstrap(a, b)
+    print(f"{label}: ci_low={result['ci_low']:.3f}, ci_high={result['ci_high']:.3f}, p={result['p_value']:.4f}")
+```
+
+**What you will see:**
+
+```
+n=12:  ci_low=0.000, ci_high=0.500, p=0.0316
+n=30:  ci_low=0.033, ci_high=0.433, p=0.0089
+n=100: ci_low=0.120, ci_high=0.340, p=0.0001
+```
+
+At n=12, ci_low sits exactly on zero because of the spike of mass there. At n=30, ci_low lifts off zero — the distribution gets smoother and the spike shrinks. At n=100, ci_low is comfortably above zero and the CI and p-value tell the same story clearly. This is the quantization regime disappearing as n grows.
+
+---
+
+## The FDE Reporting Rule
+
+At n smaller than 30 with binary outcomes, use this rule:
+
+**Lead with the p-value for direction. Report the CI as the honest range. Never use CI-grazes-zero alone to claim non-significance.**
+
+In your memo, write it like this:
+
+> *"The trained model outperformed baseline in 96.8% of bootstrap resamples (p = 0.032, one-sided). The 95% confidence interval is [0.00, 0.50] — the wide range reflects our small sample of 12 pairs, not absence of signal. We recommend treating this as a positive directional result requiring replication at larger n before a production decision."*
+
+Here is why this rule is defensible. The CI at small n with binary outcomes is dominated by quantization artifacts. The lower bound landing on zero is a mathematical consequence of discreteness, not evidence that zero lift is plausible in any meaningful sense. The p-value, by contrast, directly counts the fraction of resamples with no lift — and that fraction is small. The p-value is the more honest number to lead with at this n.
+
+What you should NOT write in your memo:
+
+> *"The result was not significant because the CI includes zero."*
+
+That sentence is misleading at n=12 because the CI includes zero for mechanical reasons, not because your data is ambiguous about the direction of lift.
+
+---
+
+## Why Percentile Method at Small n
+
+Your harness uses the percentile method — taking the 2.5th and 97.5th percentiles of the raw resample distribution. This is the simplest bootstrap CI and the easiest to explain to an executive. The downside at small n is exactly what you observed: the percentile method does not correct for bias or skew in the resample distribution, so quantization artifacts hit harder.
+
+BCa (bias-corrected and accelerated) bootstrap would partially correct for this but is harder to explain and harder to defend in a memo. For your case — 12 pairs, one directional claim, executive audience — the percentile method is fine. Just be explicit in your memo that `ci_low = 0.00` is a quantization artifact, not a clean zero.
+
+---
+
+## Sources
+
+- Efron & Tibshirani, *An Introduction to the Bootstrap* (1993), §13.3 — canonical small-n CI caveat
+- Hesterberg, *What Teachers Should Know About the Bootstrap* (2015) — percentile vs BCa at small n, free PDF available online
+- Runnable simulation above — paste into any Python environment with numpy installed
