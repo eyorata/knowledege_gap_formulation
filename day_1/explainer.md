@@ -1,53 +1,47 @@
-# Explainer: Why ci_low = 0.00 and p = 0.0316 at the Same Time (And What to Put in Your Memo)
+# Explainer: Why `ci_low = 0.00` and `p = 0.0316` Can Both Be True
 
----
+## The setup
 
-## The Question
+In my Week 11 paired-bootstrap ablation (`n=12` held-out preference pairs), I got:
 
-Eyoel ran a paired bootstrap on 12 binary outcomes and got two numbers that look like they disagree:
-- `ci_low = 0.00` (the 95% CI lower bound lands exactly on zero)
-- `p = 0.0316` (the one-sided p-value clears 0.05, suggesting a real lift)
+- `bootstrap_mean_diff = +0.2512`
+- `bootstrap_ci = [0.00, 0.50]` (percentile 95% CI)
+- `bootstrap_p_value = 0.0316` (one-sided, `P(diff <= 0)`)
 
-Which one is right? Do they contradict each other? And as an FDE writing a memo to a non-technical executive — which number do you lead with?
+At first glance this looks contradictory. If the CI lower bound is exactly zero, how can the p-value still indicate directional lift?
 
-They do not contradict each other. They measure different things. Here is exactly why.
+They are not contradictory. They answer different questions about the same resample distribution.
 
----
+## The mechanism at small n
 
-## The Mechanism: Why ci_low Lands Exactly on Zero
+With paired bootstrap on binary outcomes (0/1), each resample is built by drawing 12 pair indices with replacement. Because outcomes are discrete and sample size is small, the possible mean differences are also discrete. You do not get a smooth continuum of values; you get a small lattice.
 
-When you run a paired bootstrap on 12 binary (0/1) outcomes, each resample picks 12 indices with replacement from your 12 pairs. Because the outcomes are only 0 or 1, the number of possible unique mean differences is very small.
+That discreteness creates a real probability mass at exactly `diff = 0.00`. In plain terms: many resamples accidentally produce equal effective success rates for trained and baseline, even when the original sample shows positive lift.
 
-Think about it this way. With 12 binary pairs, each resample can only produce a mean between 0.00 and 1.00 in steps of 1/12 (0.00, 0.083, 0.167, 0.25...). That means the difference between two resampled means can only land on a small set of discrete values. Many resamples will produce a difference of exactly 0.00 — when by chance the trained model and baseline get the same count of correct answers in that resample.
+When you compute the percentile CI, `ci_low` is the 2.5th percentile of that discrete distribution. If enough mass sits at zero, the 2.5th percentile lands exactly on zero. This is why `ci_low = 0.00` can occur mechanically in small-`n` binary paired settings.
 
-This creates a **spike of mass at zero** in your 10,000 resample distribution. When you ask numpy to find the 2.5th percentile of that distribution, it lands directly on that spike. That is why `ci_low = 0.00` exactly — not approximately, not nearly, but exactly. This is what "small-n quantization" means. The word is correct. The mechanism is the discreteness of binary outcomes at small n.
+So the load-bearing point is this: the lower CI touching zero here can be a quantization artifact of small-sample discreteness, not automatically evidence of no directional signal.
 
----
+## What the p-value is measuring
 
-## Why the P-value Says Something Different
-
-Your p-value is computed as:
+In this harness the one-sided p-value is:
 
 ```python
-p_value = float((diffs <= 0).mean())
+p_value = (diffs <= 0).mean()
 ```
 
-This asks: **"In what fraction of my 10,000 resamples did the trained model NOT beat the baseline?"**
+This asks: in what fraction of bootstrap resamples did we see no lift or negative lift?
 
-The answer is 3.16% of resamples. That means in 96.84% of resamples, the trained model beat the baseline. That is what p = 0.0316 is telling you.
+For this run, that fraction is 3.16%. Equivalently, about 96.84% of resamples showed positive lift.
 
-Now here is the key insight. The CI and the p-value are asking completely different questions:
+That can coexist with `ci_low = 0.00` because the CI boundary and this tail probability summarize different aspects of the same distribution:
 
-- **CI asks:** "What is the range that contains 95% of my resample differences?" → Zero is at the very edge of that range
-- **P-value asks:** "What fraction of resamples showed zero or negative lift?" → Only 3.16%
+- CI boundary: where the lower 2.5% cutoff lies
+- One-sided p-value: total mass at or below zero
 
-Zero being at the edge of the CI does not mean the p-value is wrong. It means zero is a possible outcome in your resample distribution — but a rare one. Both numbers are simultaneously true and correct.
+In a smooth large-sample regime, these summaries tend to line up intuitively. In small discrete regimes, they can decouple.
 
----
-
-## Show Me The Code
-
-Run this yourself and watch what happens as n grows:
+## A quick simulation you can run
 
 ```python
 import numpy as np
@@ -61,71 +55,59 @@ def paired_bootstrap(a, b, n_resamples=10000, seed=42):
         diffs.append(a[idx].mean() - b[idx].mean())
     diffs = np.array(diffs)
     return {
-        "ci_low":  float(np.percentile(diffs, 2.5)),
+        "ci_low": float(np.percentile(diffs, 2.5)),
         "ci_high": float(np.percentile(diffs, 97.5)),
-        "p_value": float((diffs <= 0).mean())
+        "p": float((diffs <= 0).mean()),
     }
 
-# n=12: your actual situation
-a12 = np.array([1,1,1,1,1,0,0,0,0,0,0,0])  # 5/12 = 0.417
-b12 = np.array([1,1,0,0,0,0,0,0,0,0,0,0])  # 2/12 = 0.167
+# n=12 (small)
+a12 = np.array([1,1,1,1,1,0,0,0,0,0,0,0])
+b12 = np.array([1,1,0,0,0,0,0,0,0,0,0,0])
 
-# n=30: medium sample
+# n=30 and n=100 (larger)
 rng = np.random.default_rng(99)
 a30 = rng.binomial(1, 0.42, 30)
 b30 = rng.binomial(1, 0.17, 30)
-
-# n=100: large sample
 a100 = rng.binomial(1, 0.42, 100)
 b100 = rng.binomial(1, 0.17, 100)
 
 for label, a, b in [("n=12", a12, b12), ("n=30", a30, b30), ("n=100", a100, b100)]:
-    result = paired_bootstrap(a, b)
-    print(f"{label}: ci_low={result['ci_low']:.3f}, ci_high={result['ci_high']:.3f}, p={result['p_value']:.4f}")
+    r = paired_bootstrap(a, b)
+    print(label, r)
 ```
 
-**What you will see:**
+Typical pattern:
 
-```
-n=12:  ci_low=0.000, ci_high=0.500, p=0.0316
-n=30:  ci_low=0.033, ci_high=0.433, p=0.0089
-n=100: ci_low=0.120, ci_high=0.340, p=0.0001
-```
+- `n=12`: lower CI may land at `0.00`, with a still-small one-sided p-value
+- `n=30`: lower CI usually lifts above zero
+- `n=100`: CI and p-value behavior becomes more stable and aligned
 
-At n=12, ci_low sits exactly on zero because of the spike of mass there. At n=30, ci_low lifts off zero — the distribution gets smoother and the spike shrinks. At n=100, ci_low is comfortably above zero and the CI and p-value tell the same story clearly. This is the quantization regime disappearing as n grows.
+This progression makes the regime change visible: as `n` increases, quantization effects shrink.
 
----
+## The reporting rule I use for FDE memos
 
-## The FDE Reporting Rule
+For small-`n` paired binary evals (`n < 30`), I use this rule:
 
-At n smaller than 30 with binary outcomes, use this rule:
+1. Lead with directional p-value for the sign of the effect.
+2. Report CI as uncertainty width and be explicit about small-sample discreteness.
+3. Do not claim �no effect� from �CI touches zero� alone in this regime.
+4. Add replication language: treat result as directional evidence pending larger sample confirmation.
 
-**Lead with the p-value for direction. Report the CI as the honest range. Never use CI-grazes-zero alone to claim non-significance.**
+Memo-ready wording:
 
-In your memo, write it like this:
+> The trained arm outperformed baseline in most paired bootstrap resamples (`p = 0.0316`, one-sided). The 95% percentile CI is `[0.00, 0.50]`; the lower bound at zero is consistent with small-sample discreteness in a 12-pair binary setup. We treat this as positive directional evidence and recommend replication at larger `n` before high-stakes rollout.
 
-> *"The trained model outperformed baseline in 96.8% of bootstrap resamples (p = 0.032, one-sided). The 95% confidence interval is [0.00, 0.50] — the wide range reflects our small sample of 12 pairs, not absence of signal. We recommend treating this as a positive directional result requiring replication at larger n before a production decision."*
+## What this changed in my artifacts
 
-Here is why this rule is defensible. The CI at small n with binary outcomes is dominated by quantization artifacts. The lower bound landing on zero is a mathematical consequence of discreteness, not evidence that zero lift is plausible in any meaningful sense. The p-value, by contrast, directly counts the fraction of resamples with no lift — and that fraction is small. The p-value is the more honest number to lead with at this n.
+This closed a real gap in my Week 11 writing. I previously wrote �small-n quantization� without mechanism-level backing. After this analysis, I can now:
 
-What you should NOT write in your memo:
-
-> *"The result was not significant because the CI includes zero."*
-
-That sentence is misleading at n=12 because the CI includes zero for mechanical reasons, not because your data is ambiguous about the direction of lift.
-
----
-
-## Why Percentile Method at Small n
-
-Your harness uses the percentile method — taking the 2.5th and 97.5th percentiles of the raw resample distribution. This is the simplest bootstrap CI and the easiest to explain to an executive. The downside at small n is exactly what you observed: the percentile method does not correct for bias or skew in the resample distribution, so quantization artifacts hit harder.
-
-BCa (bias-corrected and accelerated) bootstrap would partially correct for this but is harder to explain and harder to defend in a memo. For your case — 12 pairs, one directional claim, executive audience — the percentile method is fine. Just be explicit in your memo that `ci_low = 0.00` is a quantization artifact, not a clean zero.
-
----
+- explain why `ci_low = 0.00` occurred,
+- justify why `p = 0.0316` is not inconsistent with that CI,
+- and report the result in a way that is honest, technically defensible, and executive-readable.
 
 ## Sources
 
-- Efron & Tibshirani, *An Introduction to the Bootstrap* (1993), §13.3 — canonical small-n CI caveat
-- Hesterberg, *What Teachers Should Know About the Bootstrap* (2015) — percentile vs BCa at small n, free PDF available online
-- Runnable simulation above — paste into any Python environment with numpy installed
+- Efron, B., & Tibshirani, R. J. *An Introduction to the Bootstrap* (1993).
+- Hesterberg, T. C. *What Teachers Should Know About the Bootstrap* (2015).
+
+These are the two load-bearing references for percentile bootstrap behavior and small-sample interpretation.
