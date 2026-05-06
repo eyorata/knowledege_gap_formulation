@@ -1,0 +1,3 @@
+# Evening call summary - Day 2
+
+In the evening call, the asker (Gemechis) confirmed that the most relevant failure modes were mixed-intent prospect replies and underspecified acceptance messages that looked positive but were not execution-ready. He asked for a tighter explainer that emphasized where intent interpretation should stop and deterministic commitment logic should begin. I revised the explainer to center those two ambiguity classes, added a clearer decision-ownership model (deterministic vs model vs hybrid), and rewrote the failure walkthrough around the exact handoff where correctness is lost. We also aligned on the final architecture rule: preserve uncertainty at the interface and require deterministic ratification before any side-effecting action.
