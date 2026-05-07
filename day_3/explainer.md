@@ -1,6 +1,8 @@
 # What LoRA Actually Adapts — and Why Higher Rank Doesn't Always Buy What It Looks Like It Should
 
-**Day 3 explainer · Topic: Training and post-training mechanics · Asked by: [partner] · Explainer by: Eyoel Nebiyu**
+**Day 3 explainer · Topic: Training and post-training mechanics · Asked by: Addisu · Explainer by: Eyoel Nebiyu**
+
+**Published:** https://dev.to/eyorata/-what-lora-actually-adapts-and-why-higher-rank-doesnt-always-buy-what-it-looks-like-it-should-4bfp
 
 ---
 
